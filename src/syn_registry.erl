@@ -38,13 +38,11 @@
 
 %% records
 -record(state, {
-    registry_process_exit_callback_module = undefined :: atom(),
-    registry_process_exit_callback_function = undefined :: atom()
+    registry_process_exit_callback = undefined :: { Module :: atom(), Fun ::  atom() } | undefined
 }).
 
 %% include
 -include("syn.hrl").
-
 
 %% ===================================================================
 %% API
@@ -72,14 +70,14 @@ find_by_key(Key, with_meta) ->
 find_by_pid(Pid) ->
     case i_find_by_pid(on_connected_node, Pid) of
         undefined -> undefined;
-        Process -> Process#syn_registry_table.key
+        Processes -> [ Process#syn_registry_table.key || Process <- Processes ]
     end.
 
--spec find_by_pid(Pid :: pid(), with_meta) -> {Key :: any(), Meta :: any()} | undefined.
+-spec find_by_pid(Pid :: pid(), with_meta) -> [{Key :: any(), Meta :: any()}] | undefined.
 find_by_pid(Pid, with_meta) ->
     case i_find_by_pid(on_connected_node, Pid) of
         undefined -> undefined;
-        Process -> {Process#syn_registry_table.key, Process#syn_registry_table.meta}
+        Processes -> [{Process#syn_registry_table.key, Process#syn_registry_table.meta} || Process <- Processes ]
     end.
 
 -spec register(Key :: any(), Pid :: pid()) -> ok | {error, taken | pid_already_registered}.
@@ -132,15 +130,14 @@ init([]) ->
     process_flag(trap_exit, true),
 
     %% get options
-    {ok, [ProcessExitCallbackModule, ProcessExitCallbackFunction]} = syn_utils:get_env_value(
+    {ok, ProcessExitCallback} = syn_utils:get_env_value(
         registry_process_exit_callback,
-        [undefined, undefined]
+        undefined
     ),
 
     %% build state
     {ok, #state{
-        registry_process_exit_callback_module = ProcessExitCallbackModule,
-        registry_process_exit_callback_function = ProcessExitCallbackFunction
+        registry_process_exit_callback = ProcessExitCallback
     }}.
 
 %% ----------------------------------------------------------------------------------------------------------
@@ -159,22 +156,16 @@ handle_call({register_on_node, Key, Pid, Meta}, _From, State) ->
     %% atomicity is obviously not at cluster level, which is covered by syn_consistency.
     case i_find_by_key(Key) of
         undefined ->
-            case i_find_by_pid(Pid) of
-                undefined ->
-                    %% add to table
-                    mnesia:dirty_write(#syn_registry_table{
-                        key = Key,
-                        pid = Pid,
-                        node = node(),
-                        meta = Meta
-                    }),
-                    %% link
-                    erlang:link(Pid),
-                    %% return
-                    {reply, ok, State};
-                _ ->
-                    {reply, {error, pid_already_registered}, State}
-            end;
+            mnesia:dirty_write(#syn_registry_table{
+                key = Key,
+                pid = Pid,
+                node = node(),
+                meta = Meta
+            }),
+            %% link
+            erlang:link(Pid),
+            %% return
+            {reply, ok, State};
         _ ->
             {reply, {error, taken}, State}
     end;
@@ -223,49 +214,21 @@ handle_cast(Msg, State) ->
     {stop, Reason :: any(), #state{}}.
 
 handle_info({'EXIT', Pid, Reason}, #state{
-    registry_process_exit_callback_module = ProcessExitCallbackModule,
-    registry_process_exit_callback_function = ProcessExitCallbackFunction
+    registry_process_exit_callback = ProcessExitCallback
 } = State) ->
     %% do not lock backbone
     spawn(fun() ->
         %% check if pid is in table
-        {Key, Meta} = case i_find_by_pid(Pid) of
-            undefined ->
-                %% log
-                case Reason of
-                    normal -> ok;
-                    killed -> ok;
-                    _ ->
-                        error_logger:error_msg("Received an exit message from an unlinked process ~p with reason: ~p", [Pid, Reason])
-                end,
-
-                %% return
-                {undefined, undefined};
-
-            Process ->
-                %% get process info
-                Key0 = Process#syn_registry_table.key,
-                Meta0 = Process#syn_registry_table.meta,
-
-                %% log
-                case Reason of
-                    normal -> ok;
-                    killed -> ok;
-                    _ ->
-                        error_logger:error_msg("Process with key ~p and pid ~p exited with reason: ~p", [Key0, Pid, Reason])
-                end,
-
-                %% delete from table
-                remove_process_by_key(Key0),
-
-                %% return
-                {Key0, Meta0}
-        end,
+        Meta = lists:map(fun(#syn_registry_table{ key = Key, meta = Meta} ) ->
+            %% delete from table
+            remove_process_by_key(Key),
+            { Key, Meta }
+        end, i_find_by_pid(Pid)),
 
         %% callback
-        case ProcessExitCallbackModule of
-            undefined -> ok;
-            _ -> ProcessExitCallbackModule:ProcessExitCallbackFunction(Key, Pid, Meta, Reason)
+        case ProcessExitCallback of
+            { Module, Fun } -> Module:Fun(Pid, Meta, Reason);
+            _ -> ok
         end
     end),
 
@@ -305,24 +268,23 @@ i_find_by_key(on_connected_node, Key) ->
 i_find_by_key(Key) ->
     case mnesia:dirty_read(syn_registry_table, Key) of
         [Process] -> Process;
-        _ -> undefined
+        [] -> undefined
     end.
 
--spec i_find_by_pid(on_connected_node, Pid :: pid()) -> Process :: #syn_registry_table{} | undefined.
+-spec i_find_by_pid(on_connected_node, Pid :: pid()) -> [Process :: #syn_registry_table{}] | undefined.
 i_find_by_pid(on_connected_node, Pid) ->
     case i_find_by_pid(Pid) of
-        undefined -> undefined;
-        Process -> return_if_on_connected_node(Process)
+        [] -> undefined;
+        Processes -> return_if_on_connected_node(Processes)
     end.
 
--spec i_find_by_pid(Pid :: pid()) -> Process :: #syn_registry_table{} | undefined.
+-spec i_find_by_pid(Pid :: pid()) -> [Process :: #syn_registry_table{}].
 i_find_by_pid(Pid) ->
-    case mnesia:dirty_index_read(syn_registry_table, Pid, #syn_registry_table.pid) of
-        [Process] -> Process;
-        _ -> undefined
-    end.
+    mnesia:dirty_index_read(syn_registry_table, Pid, #syn_registry_table.pid).
 
 -spec return_if_on_connected_node(Process :: #syn_registry_table{}) -> Process :: #syn_registry_table{} | undefined.
+return_if_on_connected_node(Processes) when is_list(Processes) ->
+    lists:map(fun return_if_on_connected_node/1, Processes);
 return_if_on_connected_node(Process) ->
     case lists:member(Process#syn_registry_table.node, [node() | nodes()]) of
         true -> Process;

@@ -230,15 +230,16 @@ The `registry_process_exit_callback` option allows you to specify the `module` a
 
 The callback function is defined as:
 ```erlang
-CallbackFun = fun(Key, Pid, Meta, Reason) -> any().
+CallbackFun = fun(Pid, Meta, Reason) -> any().
 
 Types:
 	Key = any()
 	Pid = pid()
-	Meta = any()
+	Meta = [{ Key :: any(), Meta :: any() }]
 	Reason = any()
 ```
-The `Key` and `Pid` are the ones of the process that exited with `Reason`.
+The `Pid` is the one of the process that exited with `Reason`.
+The `Meta` contains pair `Key` and `Meta` for each key. 
 
 For instance, if you want to print a log when a process exited:
 
@@ -246,10 +247,10 @@ For instance, if you want to print a log when a process exited:
 -module(my_callback).
 -export([callback_on_process_exit/4]).
 
-callback_on_process_exit(Key, Pid, Meta, Reason) ->
+callback_on_process_exit(Pid, Meta, Reason) ->
 	error_logger:info_msg(
 		"Process with Key ~p, Pid ~p and Meta ~p exited with reason ~p~n",
-		[Key, Pid, Meta, Reason]
+		[Pid, Meta, Reason]
 	)
 ```
 
@@ -257,7 +258,7 @@ Set it in the options:
 ```erlang
 {syn, [
     %% define callback function
-    {registry_process_exit_callback, [my_callback, callback_on_process_exit]}
+    {registry_process_exit_callback, {my_callback, callback_on_process_exit}}
 ]}
 ```
 If you don't set this option, no callback will be triggered.

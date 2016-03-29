@@ -268,8 +268,8 @@ single_node_when_mnesia_is_ram_find_by_pid_with_meta(_Config) ->
     ok = syn:register(<<"my proc 1">>, Pid1, Meta),
     ok = syn:register(<<"my proc 2">>, Pid2),
     %% retrieve
-    {<<"my proc 1">>, Meta} = syn:find_by_pid(Pid1, with_meta),
-    {<<"my proc 2">>, undefined} = syn:find_by_pid(Pid2, with_meta),
+    [{<<"my proc 1">>, Meta}] = syn:find_by_pid(Pid1, with_meta),
+    [{<<"my proc 2">>, undefined}] = syn:find_by_pid(Pid2, with_meta),
     %% kill process
     syn_test_suite_helper:kill_process(Pid1),
     syn_test_suite_helper:kill_process(Pid2),
