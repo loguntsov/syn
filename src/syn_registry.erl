@@ -152,23 +152,28 @@ init([]) ->
     {stop, Reason :: any(), #state{}}.
 
 handle_call({register_on_node, Key, Pid, Meta}, _From, State) ->
-    %% check & register in gen_server process to ensure atomicity at node level without transaction lock
-    %% atomicity is obviously not at cluster level, which is covered by syn_consistency.
-    case i_find_by_key(Key) of
-        undefined ->
-            mnesia:dirty_write(#syn_registry_table{
-                key = Key,
-                pid = Pid,
-                node = node(),
-                meta = Meta
-            }),
-            %% link
-            erlang:link(Pid),
-            %% return
-            {reply, ok, State};
-        _ ->
-            {reply, {error, taken}, State}
-    end;
+    F = fun() ->
+        case mnesia:read(syn_registry_table, Key, write) of
+            [] ->
+                mnesia:write(#syn_registry_table{
+                    key = Key,
+                    pid = Pid,
+                    node = node(),
+                    meta = Meta
+                }),
+                %% link
+                erlang:link(Pid),
+                %% return
+                ok;
+            [#syn_registry_table{ key = Key, pid = Pid, meta = Meta }] -> ok;
+            [_] -> { error, taken }
+        end
+    end,
+    Reply = case mnesia:transaction(F) of
+        { atomic, Result } -> Result;
+        { aborted, Reason } -> { error, Reason }
+    end,
+    { reply, Reply, State};
 
 handle_call({unregister_on_node, Key}, _From, State) ->
     %% we check again for key to return the correct response regardless of race conditions
